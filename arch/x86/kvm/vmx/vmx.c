@@ -14,6 +14,7 @@
  */
 
 #include <linux/frame.h>
+#include <linux/time.h>
 #include <linux/highmem.h>
 #include <linux/hrtimer.h>
 #include <linux/kernel.h>
@@ -44,6 +45,8 @@
 #include <asm/spec-ctrl.h>
 #include <asm/virtext.h>
 #include <asm/vmx.h>
+#include <asm/atomic.h>
+#include <asm/msr.h>
 
 #include "capabilities.h"
 #include "cpuid.h"
@@ -5790,6 +5793,12 @@ void dump_vmcs(void)
 		       vmcs_read16(VIRTUAL_PROCESSOR_ID));
 }
 
+
+
+struct timespec starttime;
+struct timespec curttime;
+
+
 /*
  * The guest has exited.  See if we can fix it or if we need userspace
  * assistance.
@@ -5800,9 +5809,35 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu,
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	u32 exit_reason = vmx->exit_reason;
 	u32 vectoring_info = vmx->idt_vectoring_info;
+	//uint32_t cur_num_exits;
+	extern atomic_t num_exits[68];
+	extern atomic64_t exit_time[68];
+	extern atomic_t total_exits;
+	extern atomic_t exits_per_second[100];
+	extern int exps_ind;
+	uint32_t returnvalue;
+	uint64_t actualtsc;
+	atomic64_t start_time; 
+	atomic_inc(&total_exits);
+	atomic_inc (&num_exits[exit_reason]);
+	trace_kvm_exit(exit_reason, vcpu, KVM_ISA_VMX);	
+	
+	actualtsc = rdtsc();
+	getnstimeofday(&curttime);
+	if (curttime.tv_sec - starttime.tv_sec > 1){
+		starttime.tv_sec = curttime.tv_sec;
+		starttime.tv_nsec = curttime.tv_nsec;
+		if(exps_ind<100){
+			 
+			atomic_set(&exits_per_second[exps_ind],atomic_read(&total_exits));
+			exps_ind++;
+		}	
+		
+	}
 
-	trace_kvm_exit(exit_reason, vcpu, KVM_ISA_VMX);
-
+	atomic64_set(&start_time,actualtsc);
+		
+	
 	/*
 	 * Flush logged GPAs PML buffer, this will make dirty_bitmap more
 	 * updated. Another good is, in kvm_vm_ioctl_get_dirty_log, before
@@ -5907,8 +5942,12 @@ static int vmx_handle_exit(struct kvm_vcpu *vcpu,
 					 kvm_vmx_max_exit_handlers);
 	if (!kvm_vmx_exit_handlers[exit_reason])
 		goto unexpected_vmexit;
-
-	return kvm_vmx_exit_handlers[exit_reason](vcpu);
+	
+	 returnvalue = kvm_vmx_exit_handlers[exit_reason](vcpu);
+	
+	actualtsc = rdtsc();
+	atomic64_add(actualtsc-atomic64_read(&start_time),&exit_time[exit_reason]);
+	return returnvalue;
 
 unexpected_vmexit:
 	vcpu_unimpl(vcpu, "vmx: unexpected exit reason 0x%x\n", exit_reason);
@@ -7930,9 +7969,35 @@ static void vmx_exit(void)
 }
 module_exit(vmx_exit);
 
+static void intialize_exit_counters(void){
+extern atomic_t num_exits[68];
+extern atomic64_t exit_time[68];
+extern atomic_t exits_per_second[100];
+int i =0 ;
+
+getnstimeofday(&starttime);
+
+
+
+for(i =0 ; i< 100 ;i++){
+	atomic_set(&exits_per_second[i],0);
+}
+
+for( i =0 ;i < 68 ; i++){
+		 atomic64_set(&exit_time[i],0);
+		atomic_set(&num_exits[i],0);
+		 
+	}
+
+printk("COunter varaibles forced to zero");
+
+}
+
 static int __init vmx_init(void)
 {
 	int r;
+
+
 
 #if IS_ENABLED(CONFIG_HYPERV)
 	/*
@@ -7991,7 +8056,7 @@ static int __init vmx_init(void)
 			   crash_vmclear_local_loaded_vmcss);
 #endif
 	vmx_check_vmcs12_offsets();
-
+	intialize_exit_counters();
 	return 0;
 }
 module_init(vmx_init);

@@ -1,0 +1,9 @@
+#!/bin/bash
+
+rmmod kvm_intel 
+rmmod kvm 
+make -j 4 M=arch/x86/kvm &&
+make -j 4 modules_install && 
+modprobe kvm &&
+modprobe kvm_intel &&
+echo "Successfully resetted and added the kvm modules back"

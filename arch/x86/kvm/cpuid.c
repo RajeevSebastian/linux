@@ -15,9 +15,11 @@
 #include <linux/uaccess.h>
 #include <linux/sched/stat.h>
 
+
 #include <asm/processor.h>
 #include <asm/user.h>
 #include <asm/fpu/xstate.h>
+#include <asm/atomic.h>
 #include "cpuid.h"
 #include "lapic.h"
 #include "mmu.h"
@@ -1053,17 +1055,188 @@ bool kvm_cpuid(struct kvm_vcpu *vcpu, u32 *eax, u32 *ebx,
 	return found;
 }
 EXPORT_SYMBOL_GPL(kvm_cpuid);
+atomic64_t exit_time[69];
+EXPORT_SYMBOL(exit_time);
+atomic_t total_exits;
+EXPORT_SYMBOL(total_exits);
+atomic_t num_exits[69];
+EXPORT_SYMBOL(num_exits);
+uint32_t exits_not_present[] = {35,38,42,65};
+uint32_t exits_not_handled[] ={4,5,6,11,17,66,35,38,42,65,66};
+char num_exit_table[2048];
+char num_exit_cycle_count_table[2048];
+char graph_values[2048];
+atomic_t exits_per_second[100];
+EXPORT_SYMBOL(exits_per_second);
+int exps_ind = 0;
+EXPORT_SYMBOL(exps_ind);
+
+
+int vmx_exit_not_present(u32 ecx){
+
+int i;	
+for(i =0 ;i < 4 ;i ++){
+		if(ecx == exits_not_present[i]) {
+			return 1;
+		}
+	}
+
+return 0;
+}
+
+int vmx_exits_not_handled(u32 ecx){
+
+int i;	
+for(i =0 ;i < 11 ;i ++){
+		if(ecx == exits_not_handled[i]) {
+			return 1;
+		}
+	}
+
+return 0;
+}
+
+char* concatenate(char* destination, const char* source)
+{
+	int i, j;
+	for (i = 0; destination[i] != '\0'; i++);
+
+	for (j = 0; source[j] != '\0'; j++)
+		destination[i + j] = source[j];
+
+	destination[i + j] = '\0';
+	return destination;
+}
+
+void print_exit_table(void){
+
+int i;
+uint32_t exits;
+char msg[30];
+
+memset(num_exit_table,0,sizeof(num_exit_table));
+concatenate(num_exit_table,"Number of Exits\n");
+
+for(i=0 ;i < 69 ; i++){
+	memset(msg,0,sizeof(msg));
+	if(vmx_exit_not_present(i) || vmx_exits_not_handled(i)){
+			snprintf(msg,29,"%d ---> N/A\n",i);
+	}else{
+		exits = atomic_read(&num_exits[i]);
+		snprintf(msg,29,"%d ---> %u\n",i,exits);
+	}
+	
+	concatenate(num_exit_table,msg);
+}
+printk(num_exit_table);
+}
+
+void print_exit_cycle_count_table(void){
+
+int i;
+uint64_t exittime;
+char msg[30];
+
+memset(num_exit_cycle_count_table,0,sizeof(num_exit_cycle_count_table));
+concatenate(num_exit_cycle_count_table,"Number of cycles per exits\n");
+
+for(i=0 ;i < 69 ; i++){
+	memset(msg,0,sizeof(msg));
+	if(vmx_exit_not_present(i) || vmx_exits_not_handled(i)){
+			snprintf(msg,29,"%d ---> N/A\n",i);
+	}else{
+		exittime = atomic64_read(&exit_time[i]);
+		snprintf(msg,29,"%d ---> %lld\n",i,exittime);
+	}
+	
+	 concatenate(num_exit_cycle_count_table,msg);
+}
+printk(num_exit_cycle_count_table);
+}
+
+void print_graph_values(void){
+ int i;
+uint32_t exitvalue; 
+char msg[30];
+concatenate(graph_values,"Exit frequency\n");
+
+for(i=0;i<100;i++){
+	memset(msg,0,sizeof(msg));
+	exitvalue = atomic_read(&exits_per_second[i]);
+	snprintf(msg,29,"%d ---> %d\n",i+1,exitvalue);
+	concatenate(graph_values,msg);
+}
+printk(graph_values);
+
+}
+  
 
 int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 {
 	u32 eax, ebx, ecx, edx;
-
+	
 	if (cpuid_fault_enabled(vcpu) && !kvm_require_cpl(vcpu, 0))
 		return 1;
-
+	
 	eax = kvm_rax_read(vcpu);
 	ecx = kvm_rcx_read(vcpu);
-	kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
+	//printk("eax = 0x%x\n",eax);
+	
+	if(eax == 0x4fffffff){
+		uint32_t answer =0;
+		int i =0;
+		for(i=0;i<69;i++){
+			answer = answer + atomic_read(&num_exits[i]);
+		}
+		eax =atomic_read(&total_exits);
+		ebx = answer;
+		print_exit_table();
+		print_exit_cycle_count_table();
+		print_graph_values();
+	}else if (eax == 0x4ffffffe){
+		uint64_t answer =0;
+		int i=0;	
+		for(i=0;i<69;i++){
+			answer = answer + atomic64_read(&exit_time[i]);
+		}
+		ebx = (uint32_t) (answer >> 32);
+		ecx = (uint32_t) (answer);		
+	}
+	else if (eax == 0x4ffffffd){
+		if(vmx_exit_not_present(ecx) == 1){
+			eax = 0x0;
+			ebx = 0x0;
+			ecx = 0x0;
+			edx = 0xFFFFFFFF;		
+		}else if (vmx_exits_not_handled(ecx) == 1){
+			eax = 0x0;
+			ebx = 0x0;
+			ecx = 0x0;
+			edx = 0x0;
+		}else{
+			eax = atomic_read(&num_exits[ecx]);
+		}
+	}
+	else if (eax == 0x4ffffffc){
+		if(vmx_exit_not_present(ecx) == 1){
+			eax = 0x0;
+			ebx = 0x0;
+			ecx = 0x0;
+			edx = 0xFFFFFFFF;		
+		}else if (vmx_exits_not_handled(ecx) == 1){
+			eax = 0x0;
+			ebx = 0x0;
+			ecx = 0x0;
+			edx = 0x0;
+		}else{
+			uint64_t answer = atomic64_read(&exit_time[ecx]);
+			ebx = (uint32_t) (answer >> 32);
+			ecx = (uint32_t) (answer);		
+		}
+	}
+	else{
+		kvm_cpuid(vcpu, &eax, &ebx, &ecx, &edx, true);
+	}
 	kvm_rax_write(vcpu, eax);
 	kvm_rbx_write(vcpu, ebx);
 	kvm_rcx_write(vcpu, ecx);
